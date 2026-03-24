@@ -1,6 +1,6 @@
 [package]
 name = "glab-pull-all"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "A powerful command-line tool for efficiently syncing all repositories from a GitLab group or user account with parallel processing, real-time status updates, and advanced features"
 readme = "README.md"
