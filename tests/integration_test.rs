@@ -1,88 +1,278 @@
-//! Integration tests for my-package.
+//! Integration tests for glab-pull-all.
 //!
 //! These tests verify the public API works correctly.
 
-use my_package::{add, delay, multiply};
+use glab_pull_all::cli::Args;
+use glab_pull_all::display::{RepoStatus, StatusDisplay};
+use glab_pull_all::git_ops::{self, OpType};
+use glab_pull_all::gitlab::RepoInfo;
 
-mod add_integration_tests {
+mod cli_tests {
     use super::*;
 
     #[test]
-    fn test_add_returns_correct_sum() {
-        assert_eq!(add(10, 20), 30);
+    fn test_args_validate_group_only() {
+        let args = make_args(Some("mygroup"), None);
+        assert!(args.validate().is_ok());
     }
 
     #[test]
-    fn test_add_handles_large_numbers() {
-        assert_eq!(add(1_000_000_000, 2_000_000_000), 3_000_000_000);
+    fn test_args_validate_user_only() {
+        let args = make_args(None, Some("myuser"));
+        assert!(args.validate().is_ok());
     }
 
     #[test]
-    fn test_add_handles_negative_result() {
-        assert_eq!(add(-100, 50), -50);
+    fn test_args_validate_neither() {
+        let args = make_args(None, None);
+        let err = args.validate().unwrap_err();
+        assert!(err.contains("must specify"));
+    }
+
+    #[test]
+    fn test_args_validate_both() {
+        let args = make_args(Some("g"), Some("u"));
+        let err = args.validate().unwrap_err();
+        assert!(err.contains("cannot specify both"));
+    }
+
+    #[test]
+    fn test_args_validate_pull_and_switch_conflict() {
+        let mut args = make_args(Some("g"), None);
+        args.pull_from_default = true;
+        args.switch_to_default = true;
+        assert!(args.validate().is_err());
+    }
+
+    #[test]
+    fn test_concurrency_default() {
+        let args = make_args(Some("g"), None);
+        assert_eq!(args.concurrency(), 8);
+    }
+
+    #[test]
+    fn test_concurrency_single_thread() {
+        let mut args = make_args(Some("g"), None);
+        args.single_thread = true;
+        assert_eq!(args.concurrency(), 1);
+    }
+
+    #[test]
+    fn test_concurrency_custom() {
+        let mut args = make_args(Some("g"), None);
+        args.threads = 16;
+        assert_eq!(args.concurrency(), 16);
+    }
+
+    #[test]
+    fn test_target_name_group() {
+        let args = make_args(Some("mygroup"), None);
+        assert_eq!(args.target_name(), "mygroup");
+    }
+
+    #[test]
+    fn test_target_name_user() {
+        let args = make_args(None, Some("myuser"));
+        assert_eq!(args.target_name(), "myuser");
+    }
+
+    #[test]
+    fn test_target_type_group() {
+        let args = make_args(Some("g"), None);
+        assert_eq!(args.target_type(), "group");
+    }
+
+    #[test]
+    fn test_target_type_user() {
+        let args = make_args(None, Some("u"));
+        assert_eq!(args.target_type(), "user");
+    }
+
+    #[test]
+    fn test_effective_live_updates_default() {
+        let args = make_args(Some("g"), None);
+        assert!(args.effective_live_updates());
+    }
+
+    #[test]
+    fn test_effective_live_updates_disabled() {
+        let mut args = make_args(Some("g"), None);
+        args.no_live_updates = true;
+        assert!(!args.effective_live_updates());
+    }
+
+    fn make_args(group: Option<&str>, user: Option<&str>) -> Args {
+        Args {
+            group: group.map(String::from),
+            user: user.map(String::from),
+            token: None,
+            ssh: false,
+            dir: ".".to_string(),
+            threads: 8,
+            single_thread: false,
+            live_updates: true,
+            no_live_updates: false,
+            delete: false,
+            pull_from_default: false,
+            switch_to_default: false,
+            gitlab_url: "https://gitlab.com".to_string(),
+        }
     }
 }
 
-mod multiply_integration_tests {
+mod display_tests {
     use super::*;
 
     #[test]
-    fn test_multiply_returns_correct_product() {
-        assert_eq!(multiply(10, 20), 200);
+    fn test_status_display_creation() {
+        let display = StatusDisplay::new(false, 1);
+        display.add_repo("test-repo");
+        display.update_repo("test-repo", RepoStatus::Success, "done");
     }
 
     #[test]
-    fn test_multiply_handles_large_numbers() {
-        assert_eq!(multiply(1_000, 1_000_000), 1_000_000_000);
+    fn test_status_display_error_tracking() {
+        let display = StatusDisplay::new(false, 1);
+        display.add_repo("repo1");
+        display.add_repo("repo2");
+        display.update_repo("repo1", RepoStatus::Failed, "error 1");
+        display.update_repo("repo2", RepoStatus::Failed, "error 2");
     }
 
     #[test]
-    fn test_multiply_handles_negative_numbers() {
-        assert_eq!(multiply(-10, -20), 200);
+    fn test_status_transitions() {
+        let display = StatusDisplay::new(false, 1);
+        display.add_repo("repo");
+        display.update_repo("repo", RepoStatus::Cloning, "Cloning...");
+        display.update_repo("repo", RepoStatus::Success, "done");
+    }
+
+    #[test]
+    fn test_repo_status_is_terminal() {
+        assert!(RepoStatus::Success.is_terminal());
+        assert!(RepoStatus::Failed.is_terminal());
+        assert!(RepoStatus::Skipped.is_terminal());
+        assert!(RepoStatus::Uncommitted.is_terminal());
+        assert!(!RepoStatus::Pending.is_terminal());
+        assert!(!RepoStatus::Pulling.is_terminal());
+        assert!(!RepoStatus::Cloning.is_terminal());
     }
 }
 
-mod delay_integration_tests {
+mod git_ops_tests {
     use super::*;
+    use std::path::Path;
 
-    #[tokio::test]
-    async fn test_delay_waits_minimum_time() {
-        let start = std::time::Instant::now();
-        delay(0.05).await;
-        let elapsed = start.elapsed();
+    #[test]
+    fn test_git_result_types() {
+        let result = git_ops::GitResult {
+            success: true,
+            op_type: OpType::Cloned,
+            message: "ok".to_string(),
+        };
+        assert!(result.success);
+        assert_eq!(result.op_type, OpType::Cloned);
+    }
 
-        assert!(
-            elapsed.as_secs_f64() >= 0.05,
-            "Delay should wait at least 0.05 seconds, but waited {:.4}s",
-            elapsed.as_secs_f64()
-        );
+    #[test]
+    fn test_op_type_equality() {
+        assert_eq!(OpType::Pulled, OpType::Pulled);
+        assert_ne!(OpType::Pulled, OpType::Cloned);
+        assert_ne!(OpType::MergeConflict, OpType::Failed);
     }
 
     #[tokio::test]
-    async fn test_delay_zero_completes_quickly() {
-        let start = std::time::Instant::now();
-        delay(0.0).await;
-        let elapsed = start.elapsed();
+    async fn test_has_uncommitted_changes_nonexistent() {
+        let result = git_ops::has_uncommitted_changes(Path::new("/nonexistent")).await;
+        assert!(result.is_err());
+    }
 
-        assert!(
-            elapsed.as_secs_f64() < 0.1,
-            "Zero delay should complete quickly, but took {:.4}s",
-            elapsed.as_secs_f64()
-        );
+    #[tokio::test]
+    async fn test_current_branch_nonexistent() {
+        let result = git_ops::current_branch(Path::new("/nonexistent")).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_default_branch_fallback() {
+        let branch = git_ops::get_default_branch(Path::new("/nonexistent")).await;
+        assert_eq!(branch, "main");
+    }
+
+    #[tokio::test]
+    async fn test_delete_repo_nonexistent() {
+        let dir = std::env::temp_dir().join("glab-test-delete-nonexistent");
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        let result = git_ops::delete_repo("nonexistent", &dir, &|_| {}).await;
+        assert!(result.success);
+        assert_eq!(result.op_type, OpType::Skipped);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_process_repo_private_no_token() {
+        let dir = std::env::temp_dir().join("glab-test-private-skip");
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        let repo = RepoInfo {
+            name: "private-repo".to_string(),
+            clone_url: "https://gitlab.com/test/private-repo.git".to_string(),
+            ssh_url: "git@gitlab.com:test/private-repo.git".to_string(),
+            web_url: "https://gitlab.com/test/private-repo".to_string(),
+            is_private: true,
+        };
+        let result =
+            git_ops::process_repo(&repo, &dir, false, None, false, false, false, &|_| {}).await;
+        assert!(result.success);
+        assert_eq!(result.op_type, OpType::Skipped);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+}
+
+mod gitlab_tests {
+    use super::*;
+
+    #[test]
+    fn test_repo_info_clone() {
+        let repo = RepoInfo {
+            name: "test".to_string(),
+            clone_url: "https://gitlab.com/test.git".to_string(),
+            ssh_url: "git@gitlab.com:test.git".to_string(),
+            web_url: "https://gitlab.com/test".to_string(),
+            is_private: false,
+        };
+        let cloned = repo.clone();
+        assert_eq!(cloned.name, "test");
+        assert!(!cloned.is_private);
+    }
+}
+
+mod runner_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_run_empty_repos() {
+        let dir = std::env::temp_dir().join("glab-test-runner-empty");
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        let results =
+            glab_pull_all::runner::run(&[], &dir, false, None, false, false, false, 1, false).await;
+        assert!(results.is_empty());
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }
 
 mod version_tests {
-    use my_package::VERSION;
-
     #[test]
     fn test_version_is_not_empty() {
-        assert!(!VERSION.is_empty());
+        assert!(!glab_pull_all::VERSION.is_empty());
     }
 
     #[test]
-    fn test_version_matches_cargo_toml() {
-        // Version should match the one in Cargo.toml
-        assert!(VERSION.starts_with("0."));
+    fn test_version_format() {
+        // Should be semver format
+        let parts: Vec<&str> = glab_pull_all::VERSION.split('.').collect();
+        assert_eq!(parts.len(), 3);
+        for part in parts {
+            assert!(part.parse::<u32>().is_ok());
+        }
     }
 }
