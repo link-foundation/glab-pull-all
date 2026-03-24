@@ -240,14 +240,13 @@ mod gitlab_tests {
             web_url: "https://gitlab.com/test".to_string(),
             is_private: false,
         };
-        let cloned = repo.clone();
+        let cloned = repo;
         assert_eq!(cloned.name, "test");
         assert!(!cloned.is_private);
     }
 }
 
 mod runner_tests {
-    use super::*;
 
     #[tokio::test]
     async fn test_run_empty_repos() {

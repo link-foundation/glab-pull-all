@@ -223,7 +223,7 @@ mod tests {
             web_url: "https://gitlab.com/test".to_string(),
             is_private: false,
         };
-        let cloned = repo.clone();
+        let cloned = repo;
         assert_eq!(cloned.name, "test");
     }
 }
