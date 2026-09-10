@@ -97,18 +97,19 @@ pub async fn get_repos_from_glab_cli(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let projects: Vec<GitLabProject> = serde_json::from_str(&stdout).ok()?;
 
-    Some(
-        projects
-            .into_iter()
-            .map(|p| RepoInfo {
-                name: p.name,
-                clone_url: p.http_url_to_repo,
-                ssh_url: p.ssh_url_to_repo,
-                web_url: p.web_url,
-                is_private: p.visibility == "private",
-            })
-            .collect(),
-    )
+    Some(projects.into_iter().map(RepoInfo::from).collect())
+}
+
+impl From<GitLabProject> for RepoInfo {
+    fn from(p: GitLabProject) -> Self {
+        Self {
+            name: p.name,
+            clone_url: p.http_url_to_repo,
+            ssh_url: p.ssh_url_to_repo,
+            web_url: p.web_url,
+            is_private: p.visibility == "private",
+        }
+    }
 }
 
 /// Fetch repos using the GitLab REST API directly.
@@ -177,13 +178,7 @@ pub async fn get_repos_from_api(
             break;
         }
 
-        all_projects.extend(projects.into_iter().map(|p| RepoInfo {
-            name: p.name,
-            clone_url: p.http_url_to_repo,
-            ssh_url: p.ssh_url_to_repo,
-            web_url: p.web_url,
-            is_private: p.visibility == "private",
-        }));
+        all_projects.extend(projects.into_iter().map(RepoInfo::from));
 
         page += 1;
         // Safety limit to prevent infinite loops
