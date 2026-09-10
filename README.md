@@ -67,6 +67,9 @@ glab-pull-all --group my-group --pull-from-default
 # Switch all repositories to their default branch
 glab-pull-all --group my-group --switch-to-default
 
+# Preserve group/subgroup layout, like `glab repo clone -p`
+glab-pull-all --group my-group --preserve-namespace --dir ./repos
+
 # Use a self-hosted GitLab instance
 glab-pull-all --group my-group --gitlab-url https://gitlab.example.com
 ```
@@ -80,6 +83,7 @@ glab-pull-all --group my-group --gitlab-url https://gitlab.example.com
 | `--token <token>` | `-t` | GitLab personal access token | `GITLAB_TOKEN` env |
 | `--ssh` | `-s` | Use SSH URLs for cloning | `false` |
 | `--dir <path>` | `-d` | Target directory for repositories | `.` (current) |
+| `--preserve-namespace` | `-p` | Clone into `group/subgroup/project` subdirectories | `false` |
 | `--threads <n>` | `-j` | Number of concurrent operations | `8` |
 | `--single-thread` | | Run operations sequentially | `false` |
 | `--no-live-updates` | | Disable live in-place status updates | `false` |

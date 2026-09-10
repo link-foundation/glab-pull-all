@@ -26,6 +26,8 @@ fn main() {
     println!("Example 2: Working with RepoInfo");
     let repo = RepoInfo {
         name: "example-repo".to_string(),
+        path_with_namespace: "test/example-repo".to_string(),
+        local_path: "example-repo".to_string(),
         clone_url: "https://gitlab.com/group/example-repo.git".to_string(),
         ssh_url: "git@gitlab.com:group/example-repo.git".to_string(),
         web_url: "https://gitlab.com/group/example-repo".to_string(),

@@ -108,6 +108,7 @@ mod cli_tests {
             token: None,
             ssh: false,
             dir: ".".to_string(),
+            preserve_namespace: false,
             threads: 8,
             single_thread: false,
             live_updates: true,
@@ -215,6 +216,8 @@ mod git_ops_tests {
         let _ = tokio::fs::create_dir_all(&dir).await;
         let repo = RepoInfo {
             name: "private-repo".to_string(),
+            path_with_namespace: "test/private-repo".to_string(),
+            local_path: "private-repo".to_string(),
             clone_url: "https://gitlab.com/test/private-repo.git".to_string(),
             ssh_url: "git@gitlab.com:test/private-repo.git".to_string(),
             web_url: "https://gitlab.com/test/private-repo".to_string(),
@@ -228,6 +231,111 @@ mod git_ops_tests {
     }
 }
 
+mod preserve_namespace_tests {
+    use super::*;
+    use std::process::Command;
+
+    /// Create a local bare repository with one commit and return its path.
+    fn make_origin(root: &std::path::Path) -> std::path::PathBuf {
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let git = |args: &[&str], cwd: &std::path::Path| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q", "-b", "main"], &work);
+        git(&["config", "user.email", "t@example.com"], &work);
+        git(&["config", "user.name", "t"], &work);
+        std::fs::write(work.join("README"), "x").unwrap();
+        git(&["add", "."], &work);
+        git(&["commit", "-q", "-m", "init"], &work);
+        let bare = root.join("origin.git");
+        git(
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                work.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+            root,
+        );
+        bare
+    }
+
+    fn repo(origin: &std::path::Path, preserve: bool) -> RepoInfo {
+        let repo = RepoInfo {
+            name: "project".to_string(),
+            path_with_namespace: "group/sub/project".to_string(),
+            local_path: "project".to_string(),
+            clone_url: origin.to_str().unwrap().to_string(),
+            ssh_url: String::new(),
+            web_url: String::new(),
+            is_private: false,
+        };
+        if preserve {
+            repo.with_preserved_namespace()
+        } else {
+            repo
+        }
+    }
+
+    #[tokio::test]
+    async fn test_clone_flat_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = make_origin(tmp.path());
+        let target = tmp.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let result = git_ops::process_repo(
+            &repo(&origin, false),
+            &target,
+            false,
+            None,
+            false,
+            false,
+            false,
+            &|_| {},
+        )
+        .await;
+        assert!(result.success, "{}", result.message);
+        assert_eq!(result.op_type, OpType::Cloned);
+        assert!(target.join("project").join(".git").is_dir());
+        assert!(!target.join("group").exists());
+    }
+
+    #[tokio::test]
+    async fn test_clone_into_namespace_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = make_origin(tmp.path());
+        let target = tmp.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let r = repo(&origin, true);
+        let result =
+            git_ops::process_repo(&r, &target, false, None, false, false, false, &|_| {}).await;
+        assert!(result.success, "{}", result.message);
+        assert_eq!(result.op_type, OpType::Cloned);
+        let nested = target.join("group").join("sub").join("project");
+        assert!(nested.join(".git").is_dir());
+        assert!(!target.join("project").exists());
+
+        // Second run must find the existing clone and pull, not clone again.
+        let result =
+            git_ops::process_repo(&r, &target, false, None, false, false, false, &|_| {}).await;
+        assert!(result.success, "{}", result.message);
+        assert_ne!(result.op_type, OpType::Cloned);
+
+        // Delete mode must remove the nested clone.
+        let result =
+            git_ops::process_repo(&r, &target, false, None, false, false, true, &|_| {}).await;
+        assert!(result.success, "{}", result.message);
+        assert!(!nested.exists());
+    }
+}
+
 mod gitlab_tests {
     use super::*;
 
@@ -235,6 +343,8 @@ mod gitlab_tests {
     fn test_repo_info_clone() {
         let repo = RepoInfo {
             name: "test".to_string(),
+            path_with_namespace: "test/test".to_string(),
+            local_path: "test".to_string(),
             clone_url: "https://gitlab.com/test.git".to_string(),
             ssh_url: "git@gitlab.com:test.git".to_string(),
             web_url: "https://gitlab.com/test".to_string(),
