@@ -8,6 +8,10 @@ use tokio::process::Command;
 #[derive(Debug, Clone)]
 pub struct RepoInfo {
     pub name: String,
+    /// Full namespace path as in the project URL, e.g. `group/subgroup/project`.
+    pub path_with_namespace: String,
+    /// Directory relative to the target directory where the repo is cloned.
+    pub local_path: String,
     pub clone_url: String,
     pub ssh_url: String,
     pub web_url: String,
@@ -18,6 +22,7 @@ pub struct RepoInfo {
 #[derive(Debug, Deserialize)]
 struct GitLabProject {
     name: String,
+    path_with_namespace: String,
     http_url_to_repo: String,
     ssh_url_to_repo: String,
     web_url: String,
@@ -115,12 +120,24 @@ fn parse_paginated_projects(stdout: &str) -> Option<Vec<GitLabProject>> {
 impl From<GitLabProject> for RepoInfo {
     fn from(p: GitLabProject) -> Self {
         Self {
+            local_path: p.name.clone(),
             name: p.name,
+            path_with_namespace: p.path_with_namespace,
             clone_url: p.http_url_to_repo,
             ssh_url: p.ssh_url_to_repo,
             web_url: p.web_url,
             is_private: p.visibility == "private",
         }
+    }
+}
+
+impl RepoInfo {
+    /// Clone into `path_with_namespace` instead of the flat `name` directory,
+    /// like `glab repo clone --preserve-namespace`.
+    #[must_use]
+    pub fn with_preserved_namespace(mut self) -> Self {
+        self.local_path.clone_from(&self.path_with_namespace);
+        self
     }
 }
 
@@ -223,7 +240,7 @@ mod tests {
 
     fn project_json(name: &str, visibility: &str) -> String {
         format!(
-            r#"{{"name":"{name}","http_url_to_repo":"https://gitlab.com/g/{name}.git","ssh_url_to_repo":"git@gitlab.com:g/{name}.git","web_url":"https://gitlab.com/g/{name}","visibility":"{visibility}"}}"#
+            r#"{{"name":"{name}","path_with_namespace":"g/sub/{name}","http_url_to_repo":"https://gitlab.com/g/{name}.git","ssh_url_to_repo":"git@gitlab.com:g/{name}.git","web_url":"https://gitlab.com/g/{name}","visibility":"{visibility}"}}"#
         )
     }
 
@@ -290,6 +307,8 @@ mod tests {
         let input = format!("[{}]", project_json("a", "private"));
         let repo = RepoInfo::from(parse_paginated_projects(&input).unwrap().remove(0));
         assert_eq!(repo.name, "a");
+        assert_eq!(repo.path_with_namespace, "g/sub/a");
+        assert_eq!(repo.local_path, "a");
         assert_eq!(repo.clone_url, "https://gitlab.com/g/a.git");
         assert_eq!(repo.ssh_url, "git@gitlab.com:g/a.git");
         assert_eq!(repo.web_url, "https://gitlab.com/g/a");
@@ -297,9 +316,20 @@ mod tests {
     }
 
     #[test]
+    fn test_with_preserved_namespace() {
+        let input = format!("[{}]", project_json("a", "public"));
+        let repo = RepoInfo::from(parse_paginated_projects(&input).unwrap().remove(0))
+            .with_preserved_namespace();
+        assert_eq!(repo.local_path, "g/sub/a");
+        assert_eq!(repo.name, "a");
+    }
+
+    #[test]
     fn test_repo_info_clone() {
         let repo = RepoInfo {
             name: "test".to_string(),
+            path_with_namespace: "g/test".to_string(),
+            local_path: "test".to_string(),
             clone_url: "https://gitlab.com/test.git".to_string(),
             ssh_url: "git@gitlab.com:test.git".to_string(),
             web_url: "https://gitlab.com/test".to_string(),

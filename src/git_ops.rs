@@ -479,11 +479,12 @@ pub async fn process_repo(
     delete_mode: bool,
     on_status: &(dyn Fn(&str) + Send + Sync),
 ) -> GitResult {
+    let local_path = repo.local_path.as_str();
     if delete_mode {
-        return delete_repo(&repo.name, target_dir, on_status).await;
+        return delete_repo(local_path, target_dir, on_status).await;
     }
 
-    let repo_path = target_dir.join(&repo.name);
+    let repo_path = target_dir.join(local_path);
     let exists = repo_path.is_dir();
 
     // Skip private repo without token if not yet cloned
@@ -497,9 +498,9 @@ pub async fn process_repo(
 
     if exists {
         if switch_to_default_flag {
-            switch_to_default(&repo.name, target_dir, on_status).await
+            switch_to_default(local_path, target_dir, on_status).await
         } else {
-            pull_repo(&repo.name, target_dir, pull_from_default, on_status).await
+            pull_repo(local_path, target_dir, pull_from_default, on_status).await
         }
     } else {
         let clone_url = if use_ssh {
@@ -507,7 +508,7 @@ pub async fn process_repo(
         } else {
             &repo.clone_url
         };
-        clone_repo(clone_url, &repo.name, target_dir, on_status).await
+        clone_repo(clone_url, local_path, target_dir, on_status).await
     }
 }
 
