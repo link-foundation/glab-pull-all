@@ -83,7 +83,7 @@ pub async fn get_repos_from_glab_cli(
     };
 
     let output = Command::new("glab")
-        .args(["api", &api_path])
+        .args(["api", "--paginate", &api_path])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -95,9 +95,21 @@ pub async fn get_repos_from_glab_cli(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let projects: Vec<GitLabProject> = serde_json::from_str(&stdout).ok()?;
+    let projects = parse_paginated_projects(&stdout)?;
 
     Some(projects.into_iter().map(RepoInfo::from).collect())
+}
+
+/// Parse the output of `glab api --paginate`.
+///
+/// Every page is printed as a separate JSON array (`[...][...]`), so a plain
+/// `serde_json::from_str` fails on anything beyond the first page.
+fn parse_paginated_projects(stdout: &str) -> Option<Vec<GitLabProject>> {
+    let mut projects = Vec::new();
+    for page in serde_json::Deserializer::from_str(stdout).into_iter::<Vec<GitLabProject>>() {
+        projects.extend(page.ok()?);
+    }
+    Some(projects)
 }
 
 impl From<GitLabProject> for RepoInfo {
@@ -207,6 +219,81 @@ mod tests {
     #[test]
     fn test_urlencoding_with_slashes() {
         assert_eq!(urlencoding("parent/child"), "parent%2Fchild");
+    }
+
+    fn project_json(name: &str, visibility: &str) -> String {
+        format!(
+            r#"{{"name":"{name}","http_url_to_repo":"https://gitlab.com/g/{name}.git","ssh_url_to_repo":"git@gitlab.com:g/{name}.git","web_url":"https://gitlab.com/g/{name}","visibility":"{visibility}"}}"#
+        )
+    }
+
+    #[test]
+    fn test_parse_single_page() {
+        let input = format!(
+            "[{},{}]",
+            project_json("a", "public"),
+            project_json("b", "private")
+        );
+        let projects = parse_paginated_projects(&input).unwrap();
+        assert_eq!(projects.len(), 2);
+        assert_eq!(projects[0].name, "a");
+        assert_eq!(projects[1].visibility, "private");
+    }
+
+    #[test]
+    fn test_parse_concatenated_pages() {
+        let input = format!(
+            "[{}][{}][{}]",
+            project_json("a", "public"),
+            project_json("b", "public"),
+            project_json("c", "internal")
+        );
+        let names: Vec<_> = parse_paginated_projects(&input)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_parse_pages_separated_by_whitespace() {
+        let input = format!(
+            "[{}]\n[{}]\n",
+            project_json("a", "public"),
+            project_json("b", "public")
+        );
+        assert_eq!(parse_paginated_projects(&input).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_parse_trailing_empty_page() {
+        let input = format!("[{}][]", project_json("a", "public"));
+        assert_eq!(parse_paginated_projects(&input).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_parse_empty_output() {
+        assert!(parse_paginated_projects("").unwrap().is_empty());
+        assert!(parse_paginated_projects("[]").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_parse_invalid_page_fails() {
+        let input = format!("[{}][{{\"broken\":", project_json("a", "public"));
+        assert!(parse_paginated_projects(&input).is_none());
+        assert!(parse_paginated_projects("not json").is_none());
+    }
+
+    #[test]
+    fn test_parse_maps_to_repo_info() {
+        let input = format!("[{}]", project_json("a", "private"));
+        let repo = RepoInfo::from(parse_paginated_projects(&input).unwrap().remove(0));
+        assert_eq!(repo.name, "a");
+        assert_eq!(repo.clone_url, "https://gitlab.com/g/a.git");
+        assert_eq!(repo.ssh_url, "git@gitlab.com:g/a.git");
+        assert_eq!(repo.web_url, "https://gitlab.com/g/a");
+        assert!(repo.is_private);
     }
 
     #[test]
