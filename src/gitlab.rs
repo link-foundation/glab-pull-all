@@ -109,7 +109,13 @@ pub async fn get_repos_from_glab_cli(
 ///
 /// Every page is printed as a separate JSON array (`[...][...]`), so a plain
 /// `serde_json::from_str` fails on anything beyond the first page.
+///
+/// Returns `None` for empty or unparsable output so the caller falls back to
+/// the REST API, as it did before pagination was added.
 fn parse_paginated_projects(stdout: &str) -> Option<Vec<GitLabProject>> {
+    if stdout.trim().is_empty() {
+        return None;
+    }
     let mut projects = Vec::new();
     for page in serde_json::Deserializer::from_str(stdout).into_iter::<Vec<GitLabProject>>() {
         projects.extend(page.ok()?);
@@ -293,9 +299,22 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_empty_output() {
-        assert!(parse_paginated_projects("").unwrap().is_empty());
+    fn test_parse_empty_output_falls_back() {
+        // Empty output used to fail `serde_json::from_str` and trigger the
+        // REST API fallback; keep that behaviour.
+        assert!(parse_paginated_projects("").is_none());
+        assert!(parse_paginated_projects(" \n").is_none());
+    }
+
+    #[test]
+    fn test_parse_empty_page() {
         assert!(parse_paginated_projects("[]").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_parse_error_object_fails() {
+        // glab 1.36 exits 0 on HTTP 404 and prints the error body to stdout.
+        assert!(parse_paginated_projects(r#"{"message":"404 Group Not Found"}"#).is_none());
     }
 
     #[test]
