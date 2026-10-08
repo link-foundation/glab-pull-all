@@ -47,6 +47,9 @@ async fn main() {
             colors::CYAN,
             &format!("📁 Target directory: {}", target_dir.display()),
         );
+        if args.preserve_namespace {
+            display::log(colors::CYAN, "📂 Preserve namespace: enabled");
+        }
         display::log(
             colors::CYAN,
             &format!(
@@ -87,6 +90,9 @@ async fn main() {
         }
         if args.switch_to_default {
             display::log(colors::CYAN, "🔄 Switch to default branch: enabled");
+        }
+        if args.preserve_namespace {
+            display::log(colors::CYAN, "📂 Preserve namespace: enabled");
         }
         display::log(
             colors::CYAN,
@@ -159,9 +165,15 @@ async fn main() {
         return;
     }
 
-    // Sort alphabetically
-    let mut repos = repos;
-    repos.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    let mut repos: Vec<_> = if args.preserve_namespace {
+        repos
+            .into_iter()
+            .map(gitlab::RepoInfo::with_preserved_namespace)
+            .collect()
+    } else {
+        repos
+    };
+    repos.sort_by_key(|r| r.local_path.to_lowercase());
 
     // Run operations
     runner::run(

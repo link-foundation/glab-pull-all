@@ -25,7 +25,7 @@ pub async fn run(
 
     // Add all repos to display
     for repo in repos {
-        status_display.add_repo(&repo.name);
+        status_display.add_repo(&repo.local_path);
     }
 
     // Start render loop if using live updates
@@ -98,7 +98,7 @@ async fn run_sequential(
 
     for repo in repos {
         let sd = status_display.clone();
-        let name = repo.name.clone();
+        let name = repo.local_path.clone();
         let on_status = move |msg: &str| {
             let status = match msg {
                 m if m.contains("Cloning") => RepoStatus::Cloning,
@@ -143,7 +143,7 @@ async fn run_sequential(
         } else {
             RepoStatus::Failed
         };
-        status_display.update_repo(&repo.name, final_status, &result.message);
+        status_display.update_repo(&repo.local_path, final_status, &result.message);
 
         results.push(result);
     }
@@ -181,7 +181,7 @@ async fn run_parallel(
             let _permit = sem.acquire().await.unwrap();
 
             let sd_clone = sd.clone();
-            let name = repo.name.clone();
+            let name = repo.local_path.clone();
             let on_status = move |msg: &str| {
                 let status = match msg {
                     m if m.contains("Cloning") => RepoStatus::Cloning,
@@ -226,7 +226,7 @@ async fn run_parallel(
             } else {
                 RepoStatus::Failed
             };
-            sd.update_repo(&repo.name, final_status, &result.message);
+            sd.update_repo(&repo.local_path, final_status, &result.message);
 
             result
         });

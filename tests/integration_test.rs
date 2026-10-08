@@ -108,6 +108,7 @@ mod cli_tests {
             token: None,
             ssh: false,
             dir: ".".to_string(),
+            preserve_namespace: false,
             threads: 8,
             single_thread: false,
             live_updates: true,
@@ -215,6 +216,8 @@ mod git_ops_tests {
         let _ = tokio::fs::create_dir_all(&dir).await;
         let repo = RepoInfo {
             name: "private-repo".to_string(),
+            path_with_namespace: "test/private-repo".to_string(),
+            local_path: "private-repo".to_string(),
             clone_url: "https://gitlab.com/test/private-repo.git".to_string(),
             ssh_url: "git@gitlab.com:test/private-repo.git".to_string(),
             web_url: "https://gitlab.com/test/private-repo".to_string(),
@@ -228,6 +231,226 @@ mod git_ops_tests {
     }
 }
 
+mod preserve_namespace_tests {
+    use super::*;
+    use std::process::Command;
+
+    fn git(args: &[&str], cwd: &std::path::Path) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Create a local bare repository with one commit and return its path.
+    fn make_origin(root: &std::path::Path) -> std::path::PathBuf {
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&["init", "-q", "-b", "main"], &work);
+        git(&["config", "user.email", "t@example.com"], &work);
+        git(&["config", "user.name", "t"], &work);
+        std::fs::write(work.join("README"), "x").unwrap();
+        git(&["add", "."], &work);
+        git(&["commit", "-q", "-m", "init"], &work);
+        let bare = root.join("origin.git");
+        git(
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                work.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+            root,
+        );
+        bare
+    }
+
+    fn repo(origin: &std::path::Path, preserve: bool) -> RepoInfo {
+        let repo = RepoInfo {
+            name: "project".to_string(),
+            path_with_namespace: "group/sub/project".to_string(),
+            local_path: "project".to_string(),
+            clone_url: origin.to_str().unwrap().to_string(),
+            ssh_url: String::new(),
+            web_url: String::new(),
+            is_private: false,
+        };
+        if preserve {
+            repo.with_preserved_namespace()
+        } else {
+            repo
+        }
+    }
+
+    #[tokio::test]
+    async fn test_clone_flat_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = make_origin(tmp.path());
+        let target = tmp.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let result = git_ops::process_repo(
+            &repo(&origin, false),
+            &target,
+            false,
+            None,
+            false,
+            false,
+            false,
+            &|_| {},
+        )
+        .await;
+        assert!(result.success, "{}", result.message);
+        assert_eq!(result.op_type, OpType::Cloned);
+        assert!(target.join("project").join(".git").is_dir());
+        assert!(!target.join("group").exists());
+    }
+
+    #[tokio::test]
+    async fn test_clone_into_namespace_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = make_origin(tmp.path());
+        let target = tmp.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let r = repo(&origin, true);
+        let result =
+            git_ops::process_repo(&r, &target, false, None, false, false, false, &|_| {}).await;
+        assert!(result.success, "{}", result.message);
+        assert_eq!(result.op_type, OpType::Cloned);
+        let nested = target.join("group").join("sub").join("project");
+        assert!(nested.join(".git").is_dir());
+        assert!(!target.join("project").exists());
+
+        // Second run must find the existing clone and pull, not clone again.
+        let result =
+            git_ops::process_repo(&r, &target, false, None, false, false, false, &|_| {}).await;
+        assert!(result.success, "{}", result.message);
+        assert_ne!(result.op_type, OpType::Cloned);
+
+        // Delete mode must remove the nested clone.
+        let result =
+            git_ops::process_repo(&r, &target, false, None, false, false, true, &|_| {}).await;
+        assert!(result.success, "{}", result.message);
+        assert!(!nested.exists());
+    }
+
+    fn repo_at(origin: &std::path::Path, local_path: &str) -> RepoInfo {
+        RepoInfo {
+            local_path: local_path.to_string(),
+            ..repo(origin, false)
+        }
+    }
+
+    async fn sync(repo: &RepoInfo, target: &std::path::Path) -> git_ops::GitResult {
+        git_ops::process_repo(repo, target, false, None, false, false, false, &|_| {}).await
+    }
+
+    async fn delete(repo: &RepoInfo, target: &std::path::Path) -> git_ops::GitResult {
+        git_ops::process_repo(repo, target, false, None, false, false, true, &|_| {}).await
+    }
+
+    #[tokio::test]
+    async fn test_delete_removes_empty_namespace_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = make_origin(tmp.path());
+        let target = tmp.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let a = repo_at(&origin, "group/sub/a");
+        let b = repo_at(&origin, "group/sub/b");
+        assert!(sync(&a, &target).await.success);
+        assert!(sync(&b, &target).await.success);
+
+        assert_eq!(delete(&a, &target).await.op_type, OpType::Deleted);
+        assert!(target.join("group/sub/b/.git").is_dir());
+
+        assert_eq!(delete(&b, &target).await.op_type, OpType::Deleted);
+        assert!(!target.join("group").exists());
+        assert!(target.is_dir());
+    }
+
+    /// A namespace directory created by `--preserve-namespace` (here `group/`)
+    /// can share its name with a flat clone directory. If the target directory
+    /// lives inside another git repository, git commands run in `group/` would
+    /// act on that enclosing repository instead.
+    #[tokio::test]
+    async fn test_namespace_dir_is_not_treated_as_clone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = make_origin(tmp.path());
+        let workspace = tmp.path().join("workspace");
+        git(
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                workspace.to_str().unwrap(),
+            ],
+            tmp.path(),
+        );
+        std::fs::write(workspace.join(".git/info/exclude"), "/target/\n").unwrap();
+        let target = workspace.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+
+        let nested = repo_at(&origin, "group/sub/project");
+        assert!(sync(&nested, &target).await.success);
+        let wip = target.join("group/sub/project/wip.txt");
+        std::fs::write(&wip, "uncommitted work").unwrap();
+
+        // New upstream commit that a `git pull` in the workspace would fetch.
+        let work = tmp.path().join("work");
+        std::fs::write(work.join("NEW"), "y").unwrap();
+        git(&["add", "."], &work);
+        git(&["commit", "-q", "-m", "second"], &work);
+        git(&["push", "-q", origin.to_str().unwrap(), "main"], &work);
+        let workspace_head = git(&["rev-parse", "HEAD"], &workspace);
+
+        let flat = repo_at(&origin, "group");
+        let result = sync(&flat, &target).await;
+        assert!(!result.success, "{}", result.message);
+        assert!(result.message.contains("not a git repository"));
+        assert_eq!(git(&["rev-parse", "HEAD"], &workspace), workspace_head);
+
+        let result = delete(&flat, &target).await;
+        assert_eq!(result.op_type, OpType::Skipped, "{}", result.message);
+        assert!(wip.is_file());
+    }
+
+    #[tokio::test]
+    async fn test_rejects_paths_outside_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = make_origin(tmp.path());
+        let target = tmp.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let outside = tmp.path().join("outside");
+        git(
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                outside.to_str().unwrap(),
+            ],
+            tmp.path(),
+        );
+
+        let escaping = RepoInfo {
+            path_with_namespace: "../escaped".to_string(),
+            ..repo(&origin, false)
+        }
+        .with_preserved_namespace();
+        let result = sync(&escaping, &target).await;
+        assert_eq!(result.op_type, OpType::Failed);
+        assert!(!tmp.path().join("escaped").exists());
+
+        for local_path in ["../outside", outside.to_str().unwrap()] {
+            let result = delete(&repo_at(&origin, local_path), &target).await;
+            assert_eq!(result.op_type, OpType::Failed, "{local_path}");
+            assert!(outside.join(".git").is_dir(), "{local_path}");
+        }
+    }
+}
+
 mod gitlab_tests {
     use super::*;
 
@@ -235,6 +458,8 @@ mod gitlab_tests {
     fn test_repo_info_clone() {
         let repo = RepoInfo {
             name: "test".to_string(),
+            path_with_namespace: "test/test".to_string(),
+            local_path: "test".to_string(),
             clone_url: "https://gitlab.com/test.git".to_string(),
             ssh_url: "git@gitlab.com:test.git".to_string(),
             web_url: "https://gitlab.com/test".to_string(),
@@ -262,7 +487,7 @@ mod runner_tests {
 mod version_tests {
     #[test]
     fn test_version_is_not_empty() {
-        assert!(!glab_pull_all::VERSION.is_empty());
+        assert_ne!(glab_pull_all::VERSION, "");
     }
 
     #[test]

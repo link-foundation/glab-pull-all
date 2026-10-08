@@ -30,6 +30,10 @@ pub struct Args {
     #[arg(short, long, default_value = ".")]
     pub dir: String,
 
+    /// Clone each repository into a subdirectory based on its namespace (group/subgroup/project)
+    #[arg(short = 'p', long, default_value_t = false)]
+    pub preserve_namespace: bool,
+
     /// Number of concurrent operations
     #[arg(short = 'j', long, default_value_t = 8)]
     pub threads: usize,
@@ -133,6 +137,7 @@ mod tests {
             token: None,
             ssh: false,
             dir: ".".to_string(),
+            preserve_namespace: false,
             threads: 8,
             single_thread: false,
             live_updates: true,

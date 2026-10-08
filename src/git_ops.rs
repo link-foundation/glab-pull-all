@@ -1,6 +1,6 @@
 //! Git operations: clone, pull, delete, switch-to-default, pull-from-default.
 
-use std::path::Path;
+use std::path::{Component, Path};
 use std::process::Stdio;
 use tokio::process::Command;
 
@@ -48,6 +48,22 @@ async fn run_git(repo_path: &Path, args: &[&str]) -> Result<String, String> {
         let msg = if stderr.is_empty() { stdout } else { stderr };
         Err(msg)
     }
+}
+
+/// Check if a directory is the root of its own git repository.
+///
+/// Running git in a plain directory (e.g. a `group/` namespace directory)
+/// would otherwise act on whatever repository encloses the target directory.
+fn is_repo_root(path: &Path) -> bool {
+    path.join(".git").exists()
+}
+
+/// Check that a local path stays inside the target directory when joined to it.
+fn is_safe_local_path(local_path: &str) -> bool {
+    !local_path.is_empty()
+        && Path::new(local_path)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
 }
 
 /// Check if a directory has uncommitted changes.
@@ -431,6 +447,14 @@ pub async fn delete_repo(
         };
     }
 
+    if !is_repo_root(&repo_path) {
+        return GitResult {
+            success: true,
+            op_type: OpType::Skipped,
+            message: "Not a git repository".to_string(),
+        };
+    }
+
     // Check for uncommitted changes
     on_status("Checking for uncommitted changes...");
     match has_uncommitted_changes(&repo_path).await {
@@ -454,16 +478,34 @@ pub async fn delete_repo(
     // Delete the repository
     on_status("Deleting repository...");
     match tokio::fs::remove_dir_all(&repo_path).await {
-        Ok(()) => GitResult {
-            success: true,
-            op_type: OpType::Deleted,
-            message: "Successfully deleted".to_string(),
-        },
+        Ok(()) => {
+            remove_empty_parents(repo_name, target_dir).await;
+            GitResult {
+                success: true,
+                op_type: OpType::Deleted,
+                message: "Successfully deleted".to_string(),
+            }
+        }
         Err(e) => GitResult {
             success: false,
             op_type: OpType::Failed,
             message: format!("Delete failed: {e}"),
         },
+    }
+}
+
+/// Remove namespace directories (e.g. `group/sub`) left empty after deleting
+/// a nested clone. Stops at the first non-empty one and never removes
+/// `target_dir` itself.
+async fn remove_empty_parents(repo_name: &str, target_dir: &Path) {
+    for parent in Path::new(repo_name).ancestors().skip(1) {
+        if parent.as_os_str().is_empty()
+            || tokio::fs::remove_dir(target_dir.join(parent))
+                .await
+                .is_err()
+        {
+            break;
+        }
     }
 }
 
@@ -479,11 +521,20 @@ pub async fn process_repo(
     delete_mode: bool,
     on_status: &(dyn Fn(&str) + Send + Sync),
 ) -> GitResult {
-    if delete_mode {
-        return delete_repo(&repo.name, target_dir, on_status).await;
+    let local_path = repo.local_path.as_str();
+    if !is_safe_local_path(local_path) {
+        return GitResult {
+            success: false,
+            op_type: OpType::Failed,
+            message: format!("Refusing unsafe local path: {local_path}"),
+        };
     }
 
-    let repo_path = target_dir.join(&repo.name);
+    if delete_mode {
+        return delete_repo(local_path, target_dir, on_status).await;
+    }
+
+    let repo_path = target_dir.join(local_path);
     let exists = repo_path.is_dir();
 
     // Skip private repo without token if not yet cloned
@@ -496,10 +547,17 @@ pub async fn process_repo(
     }
 
     if exists {
+        if !is_repo_root(&repo_path) {
+            return GitResult {
+                success: false,
+                op_type: OpType::Failed,
+                message: "Directory exists but is not a git repository".to_string(),
+            };
+        }
         if switch_to_default_flag {
-            switch_to_default(&repo.name, target_dir, on_status).await
+            switch_to_default(local_path, target_dir, on_status).await
         } else {
-            pull_repo(&repo.name, target_dir, pull_from_default, on_status).await
+            pull_repo(local_path, target_dir, pull_from_default, on_status).await
         }
     } else {
         let clone_url = if use_ssh {
@@ -507,7 +565,7 @@ pub async fn process_repo(
         } else {
             &repo.clone_url
         };
-        clone_repo(clone_url, &repo.name, target_dir, on_status).await
+        clone_repo(clone_url, local_path, target_dir, on_status).await
     }
 }
 
@@ -530,6 +588,18 @@ mod tests {
     fn test_op_type_equality() {
         assert_eq!(OpType::Pulled, OpType::Pulled);
         assert_ne!(OpType::Pulled, OpType::Cloned);
+    }
+
+    #[test]
+    fn test_is_safe_local_path() {
+        assert!(is_safe_local_path("project"));
+        assert!(is_safe_local_path("My Project"));
+        assert!(is_safe_local_path("group/sub/project"));
+        assert!(!is_safe_local_path(""));
+        assert!(!is_safe_local_path(".."));
+        assert!(!is_safe_local_path("../project"));
+        assert!(!is_safe_local_path("group/../../project"));
+        assert!(!is_safe_local_path("/tmp/project"));
     }
 
     #[tokio::test]
