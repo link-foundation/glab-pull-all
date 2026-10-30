@@ -284,11 +284,22 @@ fn main() {
         exit(1);
     }
 
+    // Refresh the workspace package versions without upgrading locked dependencies.
+    // Do this before committing or tagging so release builds keep a clean tree.
+    if let Err(e) = exec("cargo", &["update", "--workspace", "--manifest-path", &cargo_toml]) {
+        eprintln!("Error updating Cargo.lock: {}", e);
+        exit(1);
+    }
+
     // Collect changelog fragments
     collect_changelog(&changelog_dir, &changelog_file, &new_version);
 
-    // Stage Cargo.toml and CHANGELOG.md
-    let _ = exec("git", &["add", &cargo_toml, &changelog_file]);
+    // Include Cargo.lock in the release commit and tag.
+    let cargo_lock = Path::new(&cargo_toml).with_file_name("Cargo.lock");
+    if let Err(e) = exec("git", &["add", &cargo_toml, &cargo_lock.to_string_lossy(), &changelog_file]) {
+        eprintln!("Error staging release files: {}", e);
+        exit(1);
+    }
 
     // Check if there are changes to commit
     if exec_check("git", &["diff", "--cached", "--quiet"]) {
