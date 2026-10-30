@@ -36,8 +36,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
-  # Support both CARGO_REGISTRY_TOKEN (cargo's native env var) and CARGO_TOKEN (for backwards compatibility)
+
 jobs:
+  # === DETECT CHANGES - determines which jobs should run ===
   detect-changes:
     name: Detect Changes
     runs-on: ubuntu-latest
@@ -159,7 +160,11 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features
+        run: cargo clippy --locked --all-targets --all-features
+
+      - name: Test release version preparation
+        timeout-minutes: 5
+        run: python3 experiments/test-release-version.py
 
       - name: Check file size limit
         run: rust-script scripts/check-file-size.rs
@@ -194,10 +199,10 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run tests
-        run: cargo test --all-features --verbose
+        run: cargo test --locked --all-features --verbose
 
       - name: Run doc tests
-        run: cargo test --doc --verbose
+        run: cargo test --locked --doc --verbose
 
   # === BUILD ===
   # Build package - only runs if lint and test pass
@@ -224,10 +229,10 @@ jobs:
             ${{ runner.os }}-cargo-build-
 
       - name: Build release
-        run: cargo build --release --verbose
+        run: cargo build --locked --release --verbose
 
       - name: Check package
-        run: cargo package --list
+        run: cargo package --locked --list
 
   # === AUTO RELEASE ===
   # Automatic release on push to main using changelog fragments
@@ -284,7 +289,7 @@ jobs:
 
       - name: Build release
         if: steps.check.outputs.should_release == 'true'
-        run: cargo build --release
+        run: cargo build --locked --release
 
       - name: Authenticate with crates.io (trusted publishing)
         uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18
@@ -292,13 +297,14 @@ jobs:
         # Trusted publishing first; the publish step falls back to the token secret.
         continue-on-error: true
         if: steps.check.outputs.should_release == 'true'
+
       - name: Publish to Crates.io
         if: steps.check.outputs.should_release == 'true'
         id: publish-crate
         run: rust-script scripts/publish-crate.rs
-
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.prm_auth.outputs.token || secrets.CARGO_REGISTRY_TOKEN || secrets.CARGO_TOKEN }}
+
       - name: Create GitHub Release
         if: steps.check.outputs.should_release == 'true'
         env:
@@ -348,7 +354,7 @@ jobs:
 
       - name: Build release
         if: steps.version.outputs.version_committed == 'true' || steps.version.outputs.already_released == 'true'
-        run: cargo build --release
+        run: cargo build --locked --release
 
       - name: Authenticate with crates.io (trusted publishing)
         uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18
@@ -356,13 +362,14 @@ jobs:
         # Trusted publishing first; the publish step falls back to the token secret.
         continue-on-error: true
         if: steps.version.outputs.version_committed == 'true' || steps.version.outputs.already_released == 'true'
+
       - name: Publish to Crates.io
         if: steps.version.outputs.version_committed == 'true' || steps.version.outputs.already_released == 'true'
         id: publish-crate
         run: rust-script scripts/publish-crate.rs
-
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.prm_auth.outputs.token || secrets.CARGO_REGISTRY_TOKEN || secrets.CARGO_TOKEN }}
+
       - name: Create GitHub Release
         if: steps.version.outputs.version_committed == 'true' || steps.version.outputs.already_released == 'true'
         env:
